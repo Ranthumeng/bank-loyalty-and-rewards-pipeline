@@ -1,1 +1,1 @@
-# pretend-bank-loyalty-and-rewards-pipeline
+# pretend-bank-loyalty-and-rewards-pipeline ( Inspired by Nedbank's Greenbacks program)
