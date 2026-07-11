@@ -1,1 +1,1 @@
-# bank-loyalty-and-rewards-pipeline ( Inspired by Nedbank's Greenbacks program)
+# bank-loyalty-and-rewards-pipeline ( Inspired by Nedbank's Greenbacks initiative)
