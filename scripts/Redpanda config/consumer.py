@@ -10,7 +10,7 @@ consumer = KafkaConsumer(
   enable_auto_commit=False,
   consumer_timeout_ms=10000
 )
-consumer.subscribe("demo-topic")
+consumer.subscribe(["demo-topic"])
 
 for message in consumer:
   topic_info = f"topic: {message.topic} ({message.partition}|{message.offset})"
