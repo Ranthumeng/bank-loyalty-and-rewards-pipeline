@@ -1,7 +1,3 @@
-#=================================
-#%pip install faker
-#%pip install kafka-python
-#=================================
 
 import json
 import random
@@ -9,20 +5,17 @@ import time
 import math
 from datetime import datetime, timezone
 from faker import Faker
-from kafka import KafkaProducer
-import pprint
-import ssl
-from kafka import KafkaProducer
 import os
 
 # Define the tracking and raw landing target folders inside Unity Catalog volume
-LANDING_VOLUME_PATH = "<LANDING_VOLUME_PATH>"
-STATE_VOLUME_PATH   = "<STATE_VOLUME_PATH>"
+LANDING_VOLUME_PATH = "/Volumes/rewards_catalog/loyalty/landing/card_spend_landing"
+STATE_VOLUME_PATH   = "/Volumes/rewards_catalog/loyalty/landing/checkpoint_state"
 STATE_FILE_PATH     = os.path.join(STATE_VOLUME_PATH, "stream_metadata.json")
 
 # Ensure required persistent tracking paths exist before initiating calculations
 os.makedirs(LANDING_VOLUME_PATH, exist_ok=True)
 os.makedirs(STATE_VOLUME_PATH, exist_ok=True)
+
 
 # ==========================================
 # STATE PERSISTENCE
@@ -57,9 +50,9 @@ def save_persisted_counter(current_count):
 # INITIALIZATION
 # ==========================================
 
-# Initialize Faker with South African locale (
+# Initialize Faker with South African locale (fallback to en_ZA).
 try:
-    fake = Faker('en_ZA')
+    fake = Faker('zu_ZA')
 except Exception:
     try:
         fake = Faker()
@@ -217,7 +210,7 @@ BRAND_TIERS = {
         # Value tier is intentionally absent: TIER_MATRIX excludes domestic_travel
         # entirely for LOW_INCOME (real households at that income level essentially
         # never fly domestically), and no Value-eligible archetype includes this
-        # category.
+        # category, so this tier is never looked up in practice.
         "Mass":     ["FlySafair", "Sanparks Accommodation"],
         "Premium":  ["Airlink", "South African Airways", "Sanparks Accommodation"],
         "Ultra":    ["Lift Airline", "South African Airways"]
@@ -226,13 +219,15 @@ BRAND_TIERS = {
         "Value":    ["Pick n Pay Liquor", "Tops at Spar"],
         "Mass":     ["Tops at Spar", "Pick n Pay Liquor", "LiquorShop Checkers"],
         "Premium":  ["LiquorShop Checkers", "Ultra Liquors"],
+        # "Ultra Liquors" here is just the name of a real liquor store chain -- it isn't
+        # related to our "Ultra" income tier, it just happens to also fit that bracket.
         "Ultra":    ["Ultra Liquors"]
     }
     # "utilities" has no entry here by design. Municipal/utility billing doesn't have a
     # "premium vs budget" brand tier the way retail does -- everyone in an area pays the
     # same municipality. That merchant is instead resolved directly from the customer's
     # own home municipality (see anchors["utilities_merchant"] and the override in
-    # generate_card_spend_event)
+    # generate_card_spend_event), so a BRAND_TIERS lookup for it would be unused anyway.
 }
 ARCHETYPE_RULES = {
     "Commuter": {
@@ -279,7 +274,7 @@ ARCHETYPE_TIERS = {
     "Commuter": "Mass",  
     "Primary Residential Consumer": "Value"
 }
-# COMPREHENSIVE AREA REGISTRY (All 9 Provinces)
+# COMPREHENSIVE AREA REGISTRY (From First Version - All 9 Provinces)
 AREA_REGISTRY = {
     "Premium": [
         {"area": "Sandton", "province": "Gauteng", "municipality": "City of Johannesburg Metropolitan Municipality"},
@@ -348,167 +343,6 @@ AREA_REGISTRY = {
     ],
 }
 
-
-# ==========================================
-# CORE SYSTEM ALGORITHMS & GENERATORS
-# ==========================================
-
-class MockFaker:
-    def city(self): 
-        return random.choice(["Johannesburg", "Cape Town", "Durban", "Pretoria", "Soweto", "Gqeberha"])
-    def uuid4(self): 
-        return f"{random.randint(1000,9999)}a-{random.randint(1000,9999)}b"
-    class UniqueMock:
-        def random_int(self, min, max): 
-            return random.randint(min, max)
-    def __init__(self): 
-        self.unique = self.UniqueMock()
-
-if not fake:
-    fake = MockFaker()
-
-# LUHN CHECKSUM FOR SA ID 
-def calculate_luhn_checksum(id_12_digits):
-    """Calculates the valid 13th digit of a South African ID using the Luhn algorithm."""
-    digits = [int(d) for d in id_12_digits]
-    for i in range(len(digits) - 1, -1, -2):
-        digits[i] *= 2
-        if digits[i] > 9:
-            digits[i] -= 9
-    total = sum(digits)
-    return str((10 - (total % 10)) % 10)
-
-# SA ID GENERATOR
-def generate_south_african_id(age):
-    """Generates a structurally flawless 13-digit South African ID number."""
-    current_year = datetime.now().year
-    birth_year = current_year - age
-    yy = f"{birth_year % 100:02d}"
-    mm = f"{random.randint(1, 12):02d}"
-    
-    # Calendar month-end safety bounds
-    if mm == "02":
-        dd = f"{random.randint(1, 28):02d}"
-    elif mm in ["04", "06", "09", "11"]:
-        dd = f"{random.randint(1, 30):02d}"
-    else:
-        dd = f"{random.randint(1, 31):02d}"
-        
-    gender = f"{random.randint(0, 9999):04d}"
-    citizenship = str(random.choice([0, 1]))
-    race_digit = "8"
-    
-    base_12_digits = f"{yy}{mm}{dd}{gender}{citizenship}{race_digit}"
-    checksum_digit = calculate_luhn_checksum(base_12_digits)
-    
-    return f"{base_12_digits}{checksum_digit}"
-
-
-# ==========================================
-# CUSTOMER POOL BUILDER
-# ==========================================
-def build_customer_pool(size=2500):
-    """Creates a static pool of loyalty program participants with anchored habits."""
-    pool = []
-    archetypes = list(ARCHETYPE_RULES.keys())
-
-
-    # Define which archetypes are valid for each tier
-    TIER_VALID_ARCHETYPES = {
-        "Value": ["Foodie", "Primary Residential Consumer"],  # No fuel, no flights
-        "Mass": ["Commuter", "Foodie", "Primary Residential Consumer"],
-        "Premium": archetypes,  # All archetypes available
-        "Ultra": archetypes     # All archetypes available; weighting below favors the
-                                 # same archetypes that are natural fits for Premium
-                                 # (frequent flyers, fitness-focused spenders)
-    }
-
-
-
-    for _ in range(size):
-        age = random.randint(18, 65)
-
-        # Draw economic tier FIRST, weighted to reflect South Africa's highly unequal
-        # income distribution.
-        # The majority of households sit in the lower-income band, a substantial but
-        # thinner middle class sits in Mass, Premium/affluent households are a small
-        # minority, and Ultra-high-net-worth households are a genuinely tiny sliver
-        # (roughly comparable to real-world estimates of the top ~1% by wealth).
-      
-        customer_tier = random.choices(
-            population=["Value", "Mass", "Premium", "Ultra"],
-            weights=[0.55, 0.32, 0.12, 0.01],
-            k=1
-        )[0]
-
-        #  Archetypes whose "natural home" tier
-        # (per ARCHETYPE_TIERS) matches the drawn tier are favored, but archetypes that
-        # can plausibly appear off their home tier (e.g. a lower-income Foodie) remain
-        # possible, just less common -- this avoids re-overwriting the tier we just drew.
-        # Ultra has no archetypes of its own, so it borrows Premium's "natural home"
-        # archetypes as its favorites too (an Ultra customer is, if anything, even more
-        # likely to be a frequent domestic traveler or fitness-focused spender).
-        
-        valid_archetypes_for_tier = TIER_VALID_ARCHETYPES[customer_tier]
-        natural_home_tier = "Premium" if customer_tier == "Ultra" else customer_tier
-        archetype_weights = [
-            3 if ARCHETYPE_TIERS.get(a) == natural_home_tier else 1
-            for a in valid_archetypes_for_tier
-        ]
-        archetype = random.choices(valid_archetypes_for_tier, weights=archetype_weights, k=1)[0]
-
-
-        # Pick a home area consistent with that tier, spanning all provinces
-        home_area = random.choice(AREA_REGISTRY[customer_tier])
-
-
-        # Establish a persistent "Home Category" derived from archetype choice
-        category_choices = ARCHETYPE_RULES[archetype]["categories"]
-        category_weights = ARCHETYPE_RULES[archetype]["weights"]
-        home_category = random.choices(category_choices, weights=category_weights, k=1)[0]
-
-
-        # Anchor a specific, persistent "Home Merchant" they visit constantly,
-        # preferring a merchant that matches the customer's tier if one exists
-        tier_brands = BRAND_TIERS.get(home_category, {}).get(customer_tier)
-        if tier_brands:
-            matching = [m for m in MERCHANT_REGISTRY[home_category] if m["name"] in tier_brands]
-            home_merchant = random.choice(matching) if matching else random.choice(MERCHANT_REGISTRY[home_category])
-        else:
-            home_merchant = random.choice(MERCHANT_REGISTRY[home_category])
-
-
-        # Utilities merchant is derived directly from the customer's actual municipality
-        utilities_merchant = {"name": home_area["municipality"], "mcc": "4900"}
-
-
-        # Build local neighborhood merchants for each category
-        local_neighborhood_merchants = {}
-        for cat, merchants in MERCHANT_REGISTRY.items():
-            tier_filtered = [m for m in merchants if m["name"] in BRAND_TIERS.get(cat, {}).get(customer_tier, [])]
-            pool_to_sample = tier_filtered if tier_filtered else merchants
-            local_neighborhood_merchants[cat] = random.sample(pool_to_sample, min(2, len(pool_to_sample)))
-
-
-        pool.append({
-            "customer_id": f"CUST-{fake.unique.random_int(min=100000, max=999999)}",
-            "demographics": {
-                "age": age,
-                "sa_id_number": generate_south_african_id(age),
-                "home_town": home_area["area"],
-                "home_province": home_area["province"],
-                "living_tier": customer_tier,
-            },
-            "lifestyle_archetype": archetype,
-            "profile_anchors": {
-                "home_category": home_category,
-                "preferred_home_merchant": home_merchant,
-                "utilities_merchant": utilities_merchant,
-                "local_neighborhood_merchants": local_neighborhood_merchants
-            }
-        })
-    
-    return pool
 
 # ==========================================
 # TIER-BASED SPENDING MATRIX
@@ -601,13 +435,278 @@ CATEGORY_ENTRY_MODE_WEIGHTS = {
 # with no physical till to tap or dip a card at.
 ONLINE_ONLY_MERCHANTS = {"Uber South Africa", "Bolt Ride", "Takealot Online", "Bash Online", "Superbalist"}
 
+
+# ==========================================
+# CORE SYSTEM ALGORITHMS & GENERATORS
+# ==========================================
+
+class MockFaker:
+    def city(self): 
+        return random.choice(["Johannesburg", "Cape Town", "Durban", "Pretoria", "Soweto", "Gqeberha"])
+    def uuid4(self): 
+        return f"{random.randint(1000,9999)}a-{random.randint(1000,9999)}b"
+    class UniqueMock:
+        def random_int(self, min, max): 
+            return random.randint(min, max)
+    def __init__(self): 
+        self.unique = self.UniqueMock()
+
+if not fake:
+    fake = MockFaker()
+
+# LUHN CHECKSUM FOR SA ID (From First Version)
+def calculate_luhn_checksum(id_12_digits):
+    """Calculates the valid 13th digit of a South African ID using the Luhn algorithm."""
+    digits = [int(d) for d in id_12_digits]
+    for i in range(len(digits) - 1, -1, -2):
+        digits[i] *= 2
+        if digits[i] > 9:
+            digits[i] -= 9
+    total = sum(digits)
+    return str((10 - (total % 10)) % 10)
+
+# SA ID GENERATOR
+def generate_south_african_id(age):
+    """Generates a structurally flawless 13-digit South African ID number."""
+    current_year = datetime.now().year
+    birth_year = current_year - age
+    yy = f"{birth_year % 100:02d}"
+    mm = f"{random.randint(1, 12):02d}"
+    
+    # Calendar month-end safety bounds
+    if mm == "02":
+        dd = f"{random.randint(1, 28):02d}"
+    elif mm in ["04", "06", "09", "11"]:
+        dd = f"{random.randint(1, 30):02d}"
+    else:
+        dd = f"{random.randint(1, 31):02d}"
+        
+    gender = f"{random.randint(0, 9999):04d}"
+    citizenship = str(random.choice([0, 1]))
+    race_digit = "8"
+    
+    base_12_digits = f"{yy}{mm}{dd}{gender}{citizenship}{race_digit}"
+    checksum_digit = calculate_luhn_checksum(base_12_digits)
+    
+    return f"{base_12_digits}{checksum_digit}"
+
+# ==========================================
+# CUSTOMER POOL BUILDER
+# ==========================================
+def build_customer_pool(size=2500):
+    """Creates a static pool of loyalty program participants with anchored habits."""
+    pool = []
+    archetypes = list(ARCHETYPE_RULES.keys())
+
+    # Define which archetypes are valid for each tier
+    TIER_VALID_ARCHETYPES = {
+        "Value": ["Foodie", "Primary Residential Consumer"],  # No fuel, no flights
+        "Mass": ["Commuter", "Foodie", "Primary Residential Consumer"],
+        "Premium": archetypes,  # All archetypes available
+        "Ultra": archetypes     # All archetypes available; weighting below favors the
+                                 # same archetypes that are natural fits for Premium
+                                 # (frequent flyers, fitness-focused spenders)
+    }
+
+    # Balance and income profiles by tier. Illustrative defaults, not sourced statistics
+    # -- reasoned from South Africa's highly unequal income distribution 
+    # the same way the tier population weights below are.
+    # min_balance_floor is drawn per-customer within a tier range (not a single fixed
+    # number) so two Value-tier customers can have meaningfully different amounts of
+    # breathing room, same as real accounts do.
+    ACCOUNT_PROFILE_BY_TIER = {
+        "Value": {
+            "opening_balance": (150, 4500),
+            "min_balance_floor": (0, 250),
+            "monthly_income": (1500, 12000),
+        },
+        "Mass": {
+            "opening_balance": (800, 25000),
+            "min_balance_floor": (0, 1200),
+            "monthly_income": (9000, 45000),
+        },
+        "Premium": {
+            "opening_balance": (15000, 180000),
+            "min_balance_floor": (5000, 25000),
+            "monthly_income": (40000, 180000),
+        },
+        "Ultra": {
+            "opening_balance": (250000, 5000000),
+            "min_balance_floor": (100000, 1000000),
+            "monthly_income": (250000, 2500000),
+        }
+    }
+
+    for _ in range(size):
+        age = random.randint(18, 65)
+
+        # Draw economic tier FIRST, weighted to reflect South Africa's highly unequal
+        # income distribution.
+        customer_tier = random.choices(
+            population=["Value", "Mass", "Premium", "Ultra"],
+            weights=[0.55, 0.32, 0.12, 0.01],
+            k=1
+        )[0]
+
+        valid_archetypes_for_tier = TIER_VALID_ARCHETYPES[customer_tier]
+        natural_home_tier = "Premium" if customer_tier == "Ultra" else customer_tier
+        archetype_weights = [
+            3 if ARCHETYPE_TIERS.get(a) == natural_home_tier else 1
+            for a in valid_archetypes_for_tier
+        ]
+        archetype = random.choices(valid_archetypes_for_tier, weights=archetype_weights, k=1)[0]
+
+        # Pick a home area consistent with that tier, spanning all provinces
+        home_area = random.choice(AREA_REGISTRY[customer_tier])
+
+        # Establish a persistent "Home Category" derived from archetype choice
+        category_choices = ARCHETYPE_RULES[archetype]["categories"]
+        category_weights = ARCHETYPE_RULES[archetype]["weights"]
+        home_category = random.choices(category_choices, weights=category_weights, k=1)[0]
+
+        # Anchor a specific, persistent "Home Merchant" they visit constantly
+        tier_brands = BRAND_TIERS.get(home_category, {}).get(customer_tier)
+        if tier_brands:
+            matching = [m for m in MERCHANT_REGISTRY[home_category] if m["name"] in tier_brands]
+            home_merchant = random.choice(matching) if matching else random.choice(MERCHANT_REGISTRY[home_category])
+        else:
+            home_merchant = random.choice(MERCHANT_REGISTRY[home_category])
+
+        # Utilities merchant is derived directly from the customer's actual municipality
+        utilities_merchant = {"name": home_area["municipality"], "mcc": "4900"}
+
+        # Build local neighborhood merchants for each category
+        local_neighborhood_merchants = {}
+        for cat, merchants in MERCHANT_REGISTRY.items():
+            tier_filtered = [m for m in merchants if m["name"] in BRAND_TIERS.get(cat, {}).get(customer_tier, [])]
+            pool_to_sample = tier_filtered if tier_filtered else merchants
+            local_neighborhood_merchants[cat] = random.sample(pool_to_sample, min(2, len(pool_to_sample)))
+
+        account_profile = ACCOUNT_PROFILE_BY_TIER[customer_tier]
+        opening_balance = round(random.uniform(*account_profile["opening_balance"]), 2)
+        min_balance_floor = round(random.uniform(*account_profile["min_balance_floor"]), 2)
+        monthly_income = round(random.uniform(*account_profile["monthly_income"]), 2)
+
+        pool.append({
+            "customer_id": f"CUST-{fake.unique.random_int(min=100000, max=999999)}",
+            "demographics": {
+                "age": age,
+                "sa_id_number": generate_south_african_id(age),
+                "home_town": home_area["area"],
+                "home_province": home_area["province"],
+                "living_tier": customer_tier,
+            },
+            "lifestyle_archetype": archetype,
+            "account_profile": {
+                "opening_balance": opening_balance,
+                "current_balance": opening_balance,
+                "min_balance_floor": min_balance_floor,
+                "monthly_income": monthly_income,
+                "payday": random.randint(1, 28),  # day-of-month; capped at 28 so it's valid in every month
+                "last_paid_period": None,          # (year, month) tuple once the first payday deposit lands
+            },
+            "profile_anchors": {
+                "home_category": home_category,
+                "preferred_home_merchant": home_merchant,
+                "utilities_merchant": utilities_merchant,
+                "local_neighborhood_merchants": local_neighborhood_merchants
+            }
+        })
+
+    return pool
+
+# ==========================================
+# SPORADIC DEPOSIT EVENTS (cash, transfers, refunds)
+# ==========================================
+# SALARY is deliberately NOT one of these sources -- it's handled as a guaranteed
+# once-a-month payday deposit inline in generate_card_spend_event() instead (see below).
+# Mixing a guaranteed recurring paycheck into the same random draw as an occasional cash
+# deposit would understate how reliably salaries actually arrive relative to how random
+# a cash deposit or refund genuinely is.
+DEPOSIT_SOURCE_WEIGHTS = {
+    "Value":   [40, 35, 25],
+    "Mass":    [35, 40, 25],
+    "Premium": [20, 55, 25],
+    "Ultra":   [10, 65, 25]
+}
+DEPOSIT_SOURCES = ["CASH_DEPOSIT", "TRANSFER_IN", "REFUND"]
+
+def generate_deposit_event():
+    """Generates a standalone, sporadic credit event -- cash deposits, person-to-person
+    transfers, and merchant refunds. Called independently by the main loop for texture,
+    not as a side effect of a declined spend (that coupling was the original bug: it
+    meant a spend that couldn't go through silently turned into an unrelated income
+    event instead of being recorded as what it actually was -- a decline)."""
+    customer = random.choice(CUSTOMER_POOL)
+    tier = customer["demographics"]["living_tier"]
+    profile = customer["account_profile"]
+
+    source = random.choices(
+        DEPOSIT_SOURCES,
+        weights=DEPOSIT_SOURCE_WEIGHTS.get(tier, [40, 35, 25]),
+        k=1
+    )[0]
+
+    if source == "CASH_DEPOSIT":
+        amount = round(random.uniform(200, profile["monthly_income"] * 0.20), 2)
+        merchant_name = "Cash Deposit"
+    elif source == "TRANSFER_IN":
+        amount = round(random.uniform(100, profile["monthly_income"] * 0.25), 2)
+        merchant_name = "Bank Transfer"
+    else:
+        amount = round(random.uniform(50, profile["monthly_income"] * 0.10), 2)
+        merchant_name = "Merchant Refund"
+
+    account_balance_before = profile["current_balance"]
+    profile["current_balance"] = round(profile["current_balance"] + amount, 2)
+
+    return {
+        "transaction_id": fake.uuid4(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "amount": amount,
+        "currency": "ZAR",
+        "transaction_type": "DEPOSIT",
+        "direction": "CREDIT",
+        "status": "APPROVED",
+        "source": source,
+        "customer": {
+            "customer_id": customer["customer_id"],
+            "lifestyle_archetype": customer["lifestyle_archetype"],
+            "living_tier": tier,
+            "home_town": customer["demographics"]["home_town"]
+        },
+        "merchant": {
+            "name": merchant_name,
+            "mcc": "6012",
+            "category": "income"
+        },
+        "account_balance_before": account_balance_before,
+        "account_balance_after": profile["current_balance"]
+    }
+
 def generate_card_spend_event():
-    """Generates a transaction where behavior is driven by customer archetype and economic tier."""
+    """Generates a transaction where behavior is driven by customer archetype, economic
+    tier, and available balance. Returns a DECLINE instead of a SPEND if the attempted
+    amount is more than the customer's available balance -- the transaction is
+    recorded as having been attempted and refused, and the balance is left untouched,
+    rather than silently being swapped for an unrelated deposit event."""
     customer = random.choice(CUSTOMER_POOL)
     archetype = customer["lifestyle_archetype"]
     anchors = customer["profile_anchors"]
     tier = customer["demographics"]["living_tier"]
-    
+    profile = customer["account_profile"]
+
+    # Guaranteed monthly salary, independent of whether THIS specific spend attempt
+    # below succeeds or fails. Income arriving should never be conditional on the
+    # customer almost running out of money first -- that's backwards, and was the
+    # bug in generate_deposit_event() previously being called as a decline-rescue.
+    # Keyed off the same UTC clock the event timestamp itself uses.
+    today = datetime.now(timezone.utc).date()
+    current_period = (today.year, today.month)
+    if today.day == profile["payday"] and profile["last_paid_period"] != current_period:
+        profile["current_balance"] = round(profile["current_balance"] + profile["monthly_income"], 2)
+        profile["last_paid_period"] = current_period
+
     # Probability of spending at their specific HOME category/merchant is driven by the
     # archetype's own loyalty_strength, rather than a flat rate applied to everyone --
     # a Commuter (0.75) sticks to their usual taxi/train far more than a Foodie (0.45)
@@ -622,19 +721,19 @@ def generate_card_spend_event():
         category_weights = ARCHETYPE_RULES[archetype]["weights"]
         selected_category = random.choices(category_choices, weights=category_weights, k=1)[0]
         merchant_info = random.choice(anchors["local_neighborhood_merchants"][selected_category])
-    
+
     # Map customer tier to TIER_MATRIX and get category-specific spending parameters
     tier_profile_key = TIER_MAPPING.get(tier, "MIDDLE_CLASS")
     tier_profile = TIER_MATRIX[tier_profile_key]
-    
+
     # Check if this category is available for this economic tier
     category_config = tier_profile.get(selected_category)
-    
+
     # If category is None (not available for this tier), regenerate event
     if category_config is None:
         valid_categories = [cat for cat, config in tier_profile.items() if config is not None]
 
-        # Prefer re-rolling into one of the archetype's own categories (using their
+        # Prefer re-rolling into one of the archetype's OWN categories (using their
         # normal weighting) if any of those are valid at this tier -- this keeps the
         # persona consistent (e.g. a Foodie re-rolls into dining/groceries, not
         # into unrelated categories like retail). Only fall back to a fully generic,
@@ -661,7 +760,7 @@ def generate_card_spend_event():
     # Generate transaction amount scaled by their economic status and category
     base_amount = random.gammavariate(alpha=2, beta=category_config["beta"])
     amount = round(base_amount, 2)
-    
+
     # Force bounding box constraints
     amount = max(category_config["min_amt"], min(amount, category_config["max_amt"]))
 
@@ -676,28 +775,61 @@ def generate_card_spend_event():
         weights = CATEGORY_ENTRY_MODE_WEIGHTS.get(selected_category, [60, 30, 10])
         entry_mode = random.choices(ENTRY_MODE_LABELS, weights=weights, k=1)[0]
 
-    event = {
+    card_type = random.choices(["VISA", "MASTERCARD"], weights=[50, 50], k=1)[0]
+
+    # Balance check -- this is where a DECLINE branches off from a normal SPEND.
+    # A transaction is only declined if it costs more than what's actually in the
+    # account right now -- min_balance_floor is not used as a decline trigger, since
+    # a transaction the customer can genuinely afford should never be refused just for
+    # dipping below some notional comfort buffer.
+    account_balance_before = profile["current_balance"]
+    projected_balance = round(profile["current_balance"] - amount, 2)
+
+    base_event = {
         "transaction_id": fake.uuid4(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "amount": amount,
         "currency": "ZAR",
-        "card_type": random.choices(["VISA", "MASTERCARD"], weights=[50, 50], k=1)[0],
+        "card_type": card_type,
         "entry_mode": entry_mode,
-        
+        "direction": "DEBIT",
         "customer": {
             "customer_id": customer["customer_id"],
             "lifestyle_archetype": customer["lifestyle_archetype"],
             "living_tier": tier,
             "home_town": customer["demographics"]["home_town"]
         },
-        
         "merchant": {
             "name": merchant_info["name"],
             "mcc": merchant_info["mcc"],
             "category": selected_category
-        }
+        },
     }
-    return event
+
+    if amount > account_balance_before:
+        # DECLINED: the transaction costs more than what's in the account, so nothing
+        # was actually debited and the balance is left untouched (before == after).
+        # The attempted amount/category/merchant are still recorded -- decline rate by
+        # category/tier is itself a genuinely useful feature, not something to throw away.
+        base_event.update({
+            "transaction_type": "DECLINE",
+            "status": "DECLINED",
+            "decline_reason": "INSUFFICIENT_FUNDS",
+            "account_balance_before": account_balance_before,
+            "account_balance_after": account_balance_before,
+        })
+        return base_event
+
+    # APPROVED: debit the balance for real.
+    profile["current_balance"] = projected_balance
+    base_event.update({
+        "transaction_type": "SPEND",
+        "status": "APPROVED",
+        "account_balance_before": account_balance_before,
+        "account_balance_after": profile["current_balance"],
+    })
+    return base_event
+
 # ==========================================
 # 6. INITIALIZATION & STREAMING LOOP
 # ==========================================
@@ -705,7 +837,7 @@ print("--- INITIALIZING REALISTIC REAL-TIME ENVIRONMENT ---")
 
 
 # Build the customer static profile pool
-CUSTOMER_POOL = build_customer_pool(2500) 
+CUSTOMER_POOL = build_customer_pool(150) 
 
 
 print(f"Successfully generated database pool with {len(CUSTOMER_POOL)} distinct customer entities.")
@@ -721,6 +853,12 @@ print("-" * 125)
 
 event_counter = load_persisted_counter()  # Resume from last checkpoint
 
+# Probability that a given loop tick generates a standalone deposit event (cash deposit,
+# transfer, refund) instead of a spend/decline attempt. Guaranteed monthly salary is
+# handled separately, inline in generate_card_spend_event() -- this is just sporadic
+# "money in" texture layered on top of that.
+DEPOSIT_EVENT_PROBABILITY = 0.08
+
 
 try:
     while True:
@@ -728,8 +866,12 @@ try:
         current_time = datetime.now()
         hour = current_time.hour
         
-        # Generate the next credit card transaction record
-        tx = generate_card_spend_event()
+        # Generate the next event -- usually a spend attempt (which may itself resolve
+        # to an APPROVED spend or a DECLINE), occasionally a standalone deposit.
+        if random.random() < DEPOSIT_EVENT_PROBABILITY:
+            tx = generate_deposit_event()
+        else:
+            tx = generate_card_spend_event()
         
         # Evaluate traffic velocity thresholds dynamically matching clock hours
         if 0 <= hour <= 5:
@@ -753,13 +895,23 @@ try:
         base_sleep = 1.5 / (traffic_density + 0.01)
         actual_delay = max(0.05, min(base_sleep, 8.0)) + random.uniform(-0.05, 0.2)
         
-        # Output tabular real-time business log visualization
+        # Output tabular real-time business log visualization. Not every event type has
+        # the same fields -- deposits have no entry_mode/card_type, declines have an
+        # entry_mode but no successful debit -- so build the trailing detail per type
+        # instead of assuming every event looks like a SPEND.
         clean_ts = tx['timestamp'].replace("T", " ")[:19]
-        
+
+        if tx['transaction_type'] == "DEPOSIT":
+            trailing_detail = f"via {tx['source']}"
+        else:
+            trailing_detail = f"via {tx['entry_mode']}"
+
+        status_flag = "" if tx['status'] == "APPROVED" else f" [{tx['status']}: {tx.get('decline_reason', '')}]"
+
         print(f"[{clean_ts}] | {status_tag:<26} | EVT-{event_counter:06d} | "
               f"{tx['customer']['customer_id']} ({tx['customer']['living_tier']:<12}) -> "
               f"R{tx['amount']:>9.2f} | "
-              f"{tx['merchant']['name']:<22} | via {tx['entry_mode']}")
+              f"{tx['merchant']['name']:<22} | {trailing_detail}{status_flag}")
         
         # Write to Unity Catalog Volume for down-stream Delta Lake Streaming
         try:
@@ -785,4 +937,3 @@ except KeyboardInterrupt:
     print("\nTime-slice consumer streaming feed disconnected.")
     save_persisted_counter(event_counter)
     print(f"Final checkpoint saved at event {event_counter}")
-
