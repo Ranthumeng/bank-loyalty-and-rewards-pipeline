@@ -17,8 +17,8 @@ INSERT INTO workspace.default.greenbacks_config VALUES
   ('reference_fuel_price_per_litre', 23.50); -- placeholder
 
 -- cashback earn rate by card class and level. We only ever generate
--- VISA_MASTERCARD_DEBIT in this pipeline, but the
--- full table is seeded here for fidelity to the source and in case credit
+-- VISA_MASTERCARD_DEBIT in this pipeline (see notes in the merge script), but the
+-- full table is seeded here for fidelity to the source and in case Amex/credit
 -- modeling gets added later.
 CREATE TABLE IF NOT EXISTS workspace.default.greenbacks_level_earn_rates (
   level INT,
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS workspace.default.greenbacks_level_earn_rates (
   earn_rate DOUBLE      -- stored as a decimal fraction, e.g. 0.001 = 0.1%, NOT a whole percent
 ) USING DELTA;
 
-INSERT INTO catalog_name.schema_name.greenbacks_level_earn_rates VALUES  
+INSERT INTO workspace.default.greenbacks_level_earn_rates VALUES  
   (1, 'VISA_MASTERCARD_CREDIT', 0.002),      -- Points 
   (1, 'VISA_MASTERCARD_DEBIT',  0.001),      -- earned 
   (2, 'VISA_MASTERCARD_CREDIT', 0.004),      -- differ
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS workspace.default.greenbacks_customer_level (
   level INT
 ) USING DELTA;
 
-INSERT INTO catalog_name.schema_name.greenbacks_customer_level VALUES
+INSERT INTO workspace.default.greenbacks_customer_level VALUES
   ('Value',   1),
   ('Mass',    2),
   ('Premium', 4),
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS workspace.default.greenbacks_category_rules (
   eligible BOOLEAN
 ) USING DELTA;
 
-INSERT INTO catalog_name.schema_name.greenbacks_category_rules VALUES
+INSERT INTO workspace.default.greenbacks_category_rules VALUES
   ('groceries',             true),
   ('fuel',                  false),  -- default: only bp-equivalent merchants earn (see overrides)
   ('utilities',             true),   -- modeled as Bill Payments, which is allowed
