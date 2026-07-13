@@ -1,11 +1,26 @@
-
 import json
 import random
 import time
 import math
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from faker import Faker
 import os
+
+# All "what time is it right now" business logic (peak/off-peak traffic, merchant
+# trading hours) is evaluated in South African local time, not whatever timezone the
+# host machine happens to be running in (e.g. a Databricks cluster running in UTC).
+# Event timestamps written to the JSON payload stay in UTC (the standard for
+# downstream storage/Delta Lake), but every "is it open / is it lunchtime" decision
+# converts through this tz first so the simulation reflects real live SAST time.
+SAST = ZoneInfo("Africa/Johannesburg")
+
+def sa_now():
+    """Returns the current instant as a (utc_datetime, local_sast_datetime) pair,
+    always derived live from the real system clock -- never cached, never simulated --
+    so every call reflects the actual moment the code is running."""
+    now_utc = datetime.now(timezone.utc)
+    return now_utc, now_utc.astimezone(SAST)
 
 # Define the tracking and raw landing target folders inside Unity Catalog volume
 LANDING_VOLUME_PATH = "/Volumes/rewards_catalog/loyalty/landing/card_spend_landing"
@@ -50,7 +65,7 @@ def save_persisted_counter(current_count):
 # INITIALIZATION
 # ==========================================
 
-# Initialize Faker with South African locale (fallback to en_ZA).
+# Initialize Faker with South African locale
 try:
     fake = Faker('zu_ZA')
 except Exception:
@@ -437,6 +452,67 @@ ONLINE_ONLY_MERCHANTS = {"Uber South Africa", "Bolt Ride", "Takealot Online", "B
 
 
 # ==========================================
+# MERCHANT OPERATING HOURS
+# ==========================================
+# Trading hours in South Africa, evaluated against real live local (SAST) time as the
+# script runs -- a customer can't "spend" at a clothing store at 3am, and off-consumption
+# liquor sales are legally restricted (closed Sundays, shorter Saturday hours). Hours
+# below are illustrative typical SA trading windows, not a specific chain's exact hours.
+#
+# "always_open": True covers categories/merchants that genuinely trade 24/7 in practice:
+# fuel stations (most SA forecourts run 24 hours), utilities/EFT payments (online banking
+# has no closing time), ride-hailing apps, and pure e-commerce storefronts.
+MERCHANT_OPERATING_HOURS = {
+    "groceries":              {"open": 7,  "close": 21},   # typical supermarket hours
+    "fuel":                   {"always_open": True},        # SA forecourts widely trade 24/7
+    "utilities":              {"always_open": True},        # EFT / online municipal payment
+    "dining":                 {"open": 8,  "close": 23},
+    "pharmacy":               {"open": 8,  "close": 20},
+    "retail":                 {"open": 9,  "close": 19},
+    "fitness":                {"open": 5,  "close": 22},
+    "transport":              {"open": 5,  "close": 23},    # default; ride-hailing overridden below
+    "domestic_travel":        {"always_open": True},        # flights/accommodation booked online anytime
+    "alcohol_and_nightlife":  {"open": 9,  "close": 18},    # off-consumption liquor sales; special-cased below
+}
+
+# Per-merchant overrides where a specific brand doesn't follow its category default
+# (ride-hailing apps and pure online storefronts trade 24/7 regardless of category norms;
+# rail operators keep to scheduled operating windows tighter than the transport default).
+MERCHANT_HOURS_OVERRIDE = {
+    "Uber South Africa":    {"always_open": True},
+    "Bolt Ride":            {"always_open": True},
+    "Takealot Online":      {"always_open": True},
+    "Bash Online":          {"always_open": True},
+    "Superbalist":          {"always_open": True},
+    "PRASA Metrorail":      {"open": 5, "close": 20},
+    "Gautrain":             {"open": 5, "close": 21},
+}
+
+
+def is_merchant_open(category, merchant_name, now_local):
+    """Checks whether a given merchant is currently trading, based on real live SAST
+    local time (now_local). This is what makes spend generation 'real-time' rather than
+    just timestamp-labeled -- a 2am transaction attempt at a clothing store won't be
+    generated, because the clothing store genuinely isn't open at 2am."""
+    hours = MERCHANT_HOURS_OVERRIDE.get(merchant_name) or MERCHANT_OPERATING_HOURS.get(category)
+
+    if not hours or hours.get("always_open"):
+        return True
+
+    weekday = now_local.weekday()  # Monday=0 ... Sunday=6
+
+    if category == "alcohol_and_nightlife":
+        # SA off-consumption liquor trading: closed Sundays entirely, shorter hours
+        # on Saturdays (13:00 cutoff), normal window on weekdays.
+        if weekday == 6:
+            return False
+        close_hour = 13 if weekday == 5 else hours["close"]
+        return hours["open"] <= now_local.hour < close_hour
+
+    return hours["open"] <= now_local.hour < hours["close"]
+
+
+# ==========================================
 # CORE SYSTEM ALGORITHMS & GENERATORS
 # ==========================================
 
@@ -509,8 +585,8 @@ def build_customer_pool(size=2500):
     }
 
     # Balance and income profiles by tier. Illustrative defaults, not sourced statistics
-    # -- reasoned from South Africa's highly unequal income distribution 
-    # the same way the tier population weights below are.
+    # -- reasoned from South Africa's highly unequal income distribution (Gini ~0.63,
+    # among the highest in the world) the same way the tier population weights below are.
     # min_balance_floor is drawn per-customer within a tier range (not a single fixed
     # number) so two Value-tier customers can have meaningfully different amounts of
     # breathing room, same as real accounts do.
@@ -684,76 +760,92 @@ def generate_deposit_event():
         "account_balance_after": profile["current_balance"]
     }
 
+def _pick_open_category_and_merchant(customer, tier_profile, now_local, max_attempts=8):
+    """Selects a (category, merchant) pair for this spend attempt that is BOTH
+    economically valid for the customer's tier (tier_profile[category] is not None)
+    AND actually trading right now, per real live SAST time. This replaces a plain
+    'is the category available at this income tier' check with 'is the category
+    available at this income tier AND is that specific merchant open at this instant' --
+    the same archetype-loyalty-then-fallback pattern as before, just time-aware."""
+    archetype = customer["lifestyle_archetype"]
+    anchors = customer["profile_anchors"]
+    category_choices = ARCHETYPE_RULES[archetype]["categories"]
+    category_weights = ARCHETYPE_RULES[archetype]["weights"]
+    home_category = anchors["home_category"]
+    home_merchant_probability = ARCHETYPE_RULES[archetype]["loyalty_strength"]
+
+    for attempt in range(max_attempts):
+        if attempt == 0 and random.random() < home_merchant_probability:
+            candidate_category = home_category
+            candidate_merchant = anchors["preferred_home_merchant"]
+        else:
+            candidate_category = random.choices(category_choices, weights=category_weights, k=1)[0]
+            candidate_merchant = random.choice(anchors["local_neighborhood_merchants"][candidate_category])
+
+        if tier_profile.get(candidate_category) is None:
+            continue  # not economically available at this customer's income tier
+        if not is_merchant_open(candidate_category, candidate_merchant["name"], now_local):
+            continue  # merchant is closed right now
+
+        return candidate_category, candidate_merchant
+
+    # Exhaustive fallback: scan every category valid at this tier for ANY merchant
+    # that's open right now, so a real-time-open transaction can still be found even
+    # if the archetype's usual haunts are all closed at this hour.
+    open_options = []
+    for cat, config in tier_profile.items():
+        if config is None:
+            continue
+        for merchant in MERCHANT_REGISTRY.get(cat, []):
+            if is_merchant_open(cat, merchant["name"], now_local):
+                open_options.append((cat, merchant))
+    if open_options:
+        return random.choice(open_options)
+
+    # Absolute last resort (should essentially never trigger, since fuel, utilities,
+    # transport's Uber/Bolt leg, and domestic_travel booking are always-open): utilities
+    # is always-open and always economically valid, so it's a safe universal fallback.
+    return "utilities", anchors["utilities_merchant"]
+
+
 def generate_card_spend_event():
     """Generates a transaction where behavior is driven by customer archetype, economic
-    tier, and available balance. Returns a DECLINE instead of a SPEND if the attempted
-    amount is more than the customer's available balance -- the transaction is
+    tier, real live South African local time (for merchant trading hours and payday
+    timing), and available balance. Returns a DECLINE instead of a SPEND if the
+    attempted amount is more than the customer's available balance -- the transaction is
     recorded as having been attempted and refused, and the balance is left untouched,
     rather than silently being swapped for an unrelated deposit event."""
     customer = random.choice(CUSTOMER_POOL)
-    archetype = customer["lifestyle_archetype"]
-    anchors = customer["profile_anchors"]
     tier = customer["demographics"]["living_tier"]
     profile = customer["account_profile"]
+    anchors = customer["profile_anchors"]
+
+    # Live clock read: UTC instant for the stored timestamp, SAST local time for every
+    # real-world business-hours decision (payday date, merchant trading hours).
+    now_utc, now_local = sa_now()
 
     # Guaranteed monthly salary, independent of whether THIS specific spend attempt
     # below succeeds or fails. Income arriving should never be conditional on the
     # customer almost running out of money first -- that's backwards, and was the
     # bug in generate_deposit_event() previously being called as a decline-rescue.
-    # Keyed off the same UTC clock the event timestamp itself uses.
-    today = datetime.now(timezone.utc).date()
-    current_period = (today.year, today.month)
-    if today.day == profile["payday"] and profile["last_paid_period"] != current_period:
+    # Keyed off local SAST calendar date, since a salary "lands on the 25th" refers to
+    # the 25th in South African local time, not the UTC calendar date.
+    current_period = (now_local.year, now_local.month)
+    if now_local.day == profile["payday"] and profile["last_paid_period"] != current_period:
         profile["current_balance"] = round(profile["current_balance"] + profile["monthly_income"], 2)
         profile["last_paid_period"] = current_period
-
-    # Probability of spending at their specific HOME category/merchant is driven by the
-    # archetype's own loyalty_strength, rather than a flat rate applied to everyone --
-    # a Commuter (0.75) sticks to their usual taxi/train far more than a Foodie (0.45)
-    # sticks to one restaurant.
-    home_merchant_probability = ARCHETYPE_RULES[archetype]["loyalty_strength"]
-    if random.random() < home_merchant_probability:
-        selected_category = anchors["home_category"]
-        merchant_info = anchors["preferred_home_merchant"]
-    else:
-        # Fallback to other archetype interests from their local neighborhood cluster
-        category_choices = ARCHETYPE_RULES[archetype]["categories"]
-        category_weights = ARCHETYPE_RULES[archetype]["weights"]
-        selected_category = random.choices(category_choices, weights=category_weights, k=1)[0]
-        merchant_info = random.choice(anchors["local_neighborhood_merchants"][selected_category])
 
     # Map customer tier to TIER_MATRIX and get category-specific spending parameters
     tier_profile_key = TIER_MAPPING.get(tier, "MIDDLE_CLASS")
     tier_profile = TIER_MATRIX[tier_profile_key]
 
-    # Check if this category is available for this economic tier
-    category_config = tier_profile.get(selected_category)
-
-    # If category is None (not available for this tier), regenerate event
-    if category_config is None:
-        valid_categories = [cat for cat, config in tier_profile.items() if config is not None]
-
-        # Prefer re-rolling into one of the archetype's OWN categories (using their
-        # normal weighting) if any of those are valid at this tier -- this keeps the
-        # persona consistent (e.g. a Foodie re-rolls into dining/groceries, not
-        # into unrelated categories like retail). Only fall back to a fully generic,
-        # unweighted pick across all valid categories if the archetype has no
-        # categories that survive at this tier.
-        archetype_categories = ARCHETYPE_RULES[archetype]["categories"]
-        archetype_weights = ARCHETYPE_RULES[archetype]["weights"]
-        relevant = [(cat, w) for cat, w in zip(archetype_categories, archetype_weights) if cat in valid_categories]
-
-        if relevant:
-            cats, weights = zip(*relevant)
-            selected_category = random.choices(cats, weights=weights, k=1)[0]
-        else:
-            selected_category = random.choice(valid_categories)
-
-        merchant_info = random.choice(anchors["local_neighborhood_merchants"][selected_category])
-        category_config = tier_profile[selected_category]
+    # Pick a category/merchant that's both economically valid for this tier AND
+    # actually open right now, in real SAST time.
+    selected_category, merchant_info = _pick_open_category_and_merchant(customer, tier_profile, now_local)
+    category_config = tier_profile[selected_category]
 
     # Utilities are billed by the customer's own municipality, not a random
-    # nationwide utilities merchant -- override whatever the branches above picked.
+    # nationwide utilities merchant -- override whatever the selection above picked.
     if selected_category == "utilities":
         merchant_info = anchors["utilities_merchant"]
 
@@ -787,7 +879,7 @@ def generate_card_spend_event():
 
     base_event = {
         "transaction_id": fake.uuid4(),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": now_utc.isoformat(),
         "amount": amount,
         "currency": "ZAR",
         "card_type": card_type,
@@ -837,7 +929,7 @@ print("--- INITIALIZING REALISTIC REAL-TIME ENVIRONMENT ---")
 
 
 # Build the customer static profile pool
-CUSTOMER_POOL = build_customer_pool(150) 
+CUSTOMER_POOL = build_customer_pool(2500) 
 
 
 print(f"Successfully generated database pool with {len(CUSTOMER_POOL)} distinct customer entities.")
@@ -848,6 +940,7 @@ print("="*115 + "\n")
 
 
 print("Starting Production-Grade Peak/Off-Peak Card Feed... Click standard Jupyter STOP button to halt.")
+print(f"Live clock reference: South Africa Standard Time (Africa/Johannesburg, UTC+2)")
 print("-" * 125)
 
 
@@ -863,17 +956,23 @@ DEPOSIT_EVENT_PROBABILITY = 0.08
 try:
     while True:
         event_counter += 1
-        current_time = datetime.now()
-        hour = current_time.hour
+
+        # Live clock read for THIS tick's peak/off-peak traffic classification.
+        # Always converted through SAST so the "lunch rush" / "evening commute" bands
+        # line up with real South African wall-clock time regardless of what timezone
+        # the underlying host machine's system clock is set to.
+        _, now_local = sa_now()
+        hour = now_local.hour
         
         # Generate the next event -- usually a spend attempt (which may itself resolve
-        # to an APPROVED spend or a DECLINE), occasionally a standalone deposit.
+        # to an APPROVED spend or a DECLINE, and which now also respects real-time
+        # merchant trading hours), occasionally a standalone deposit.
         if random.random() < DEPOSIT_EVENT_PROBABILITY:
             tx = generate_deposit_event()
         else:
             tx = generate_card_spend_event()
         
-        # Evaluate traffic velocity thresholds dynamically matching clock hours
+        # Evaluate traffic velocity thresholds dynamically matching live SAST clock hours
         if 0 <= hour <= 5:
             traffic_density = random.uniform(0.01, 0.05)
             status_tag = "OFF-PEAK (LATE NIGHT)"
@@ -899,7 +998,12 @@ try:
         # the same fields -- deposits have no entry_mode/card_type, declines have an
         # entry_mode but no successful debit -- so build the trailing detail per type
         # instead of assuming every event looks like a SPEND.
-        clean_ts = tx['timestamp'].replace("T", " ")[:19]
+        # tx['timestamp'] is stored in UTC (correct for the JSON payload / downstream
+        # Delta Lake use), but the console log should read in real South African local
+        # time -- otherwise the printed clock looks 2 hours "behind" the merchant-hours
+        # and payday logic, which are already evaluated against true SAST time.
+        event_ts_local = datetime.fromisoformat(tx['timestamp']).astimezone(SAST)
+        clean_ts = event_ts_local.strftime("%Y-%m-%d %H:%M:%S")
 
         if tx['transaction_type'] == "DEPOSIT":
             trailing_detail = f"via {tx['source']}"
