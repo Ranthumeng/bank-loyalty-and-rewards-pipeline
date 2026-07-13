@@ -450,6 +450,43 @@ CATEGORY_ENTRY_MODE_WEIGHTS = {
 # with no physical till to tap or dip a card at.
 ONLINE_ONLY_MERCHANTS = {"Uber South Africa", "Bolt Ride", "Takealot Online", "Bash Online", "Superbalist"}
 
+# Merchants that, in real life, have no online store / online ordering / online payment
+# channel at all -- so an ONLINE entry_mode should never be generated for them, even
+# though their broader category (groceries, dining, etc.) has some online share overall.
+# This is the flip side of ONLINE_ONLY_MERCHANTS: these merchants are physical-only.
+#
+# Reasoning per category:
+#  - groceries: Boxer, USave and Cambridge Food are budget/discount banners with no
+#    e-commerce site or delivery app (unlike Woolworths, Checkers Sixty60, Pick n Pay
+#    asap!, or Shoprite, which do have online ordering and are left able to roll ONLINE).
+#    Food Lovers Market operates as independent franchise stores with no unified online
+#    storefront either.
+#  - retail: PEP, Ackermans and Jet are budget clothing/homeware retailers that trade
+#    in-store only, unlike Mr Price, Foschini, Truworths, Zara, Cape Union Mart (which
+#    all run real e-commerce sites).
+#  - dining: Chesanyama, Fish and Chip Co and Pedros Chicken are small/informal local
+#    chains without a delivery-app presence, unlike KFC, Nando's, Steers, Debonairs,
+#    Spur, Mugg & Bean, etc. which are all listed on delivery apps.
+#  - pharmacy: MediRite is an independent community pharmacy banner with no online
+#    store, unlike Clicks and Dis-Chem which both run e-commerce sites.
+#  - fitness: Local Community Gym is a small, informal operator -- no online membership
+#    portal -- unlike Virgin Active/Planet Fitness/Viva Gym/Totalsports/Cycle Lab/
+#    Sportsmans Warehouse, which all have online payment/booking or e-commerce.
+#  - transport: PRASA Metrorail ticketing is cash/card at the station window, not an
+#    online channel (Gautrain, by contrast, does support online top-up/booking).
+#  - alcohol_and_nightlife: off-consumption liquor retailers here are modeled as
+#    in-store only -- online liquor delivery exists in SA but is a narrow, separately
+#    licensed niche, not the default channel for these chains.
+NO_ONLINE_MERCHANTS = {
+    "Boxer Superstores", "USave", "Cambridge Food", "Food Lovers Market",
+    "PEP Stores", "Ackermans", "Jet",
+    "Chesanyama", "Fish and Chip Co", "Pedros Chicken",
+    "MediRite Pharmacy",
+    "Local Community Gym",
+    "PRASA Metrorail",
+    "Tops at Spar", "LiquorShop Checkers", "Pick n Pay Liquor", "Ultra Liquors",
+}
+
 
 # ==========================================
 # MERCHANT OPERATING HOURS
@@ -856,13 +893,23 @@ def generate_card_spend_event():
     # Force bounding box constraints
     amount = max(category_config["min_amt"], min(amount, category_config["max_amt"]))
 
-    # Entry mode depends on the category's typical payment channel, with specific
-    # online-only merchants (ride-hailing apps, online-only retailers) always forced
-    # to ONLINE regardless of what their category normally looks like.
+    # Entry mode depends on the category's typical payment channel, with two kinds of
+    # merchant-level exceptions layered on top of the category default:
+    #   - ONLINE_ONLY_MERCHANTS (ride-hailing apps, online-only retailers) are always
+    #     forced to ONLINE, since they have no physical till to tap or dip a card at.
+    #   - NO_ONLINE_MERCHANTS (budget/independent chains with no e-commerce or online
+    #     ordering channel) can never roll ONLINE, even though their category overall
+    #     has some online share -- that share belongs to the category's online-capable
+    #     chains, not to every merchant in it. The online weight is dropped and the
+    #     remaining tap/chip weights are used as-is (random.choices normalizes them,
+    #     so their relative proportions are preserved).
     # (Taxis are excluded entirely from MERCHANT_REGISTRY since they're cash-only
     # and would never generate a card transaction in the first place.)
     if merchant_info["name"] in ONLINE_ONLY_MERCHANTS:
         entry_mode = "ONLINE"
+    elif merchant_info["name"] in NO_ONLINE_MERCHANTS:
+        tap_weight, chip_weight, _online_weight = CATEGORY_ENTRY_MODE_WEIGHTS.get(selected_category, [60, 30, 10])
+        entry_mode = random.choices(["TAP_AND_GO", "CHIP_PIN"], weights=[tap_weight, chip_weight], k=1)[0]
     else:
         weights = CATEGORY_ENTRY_MODE_WEIGHTS.get(selected_category, [60, 30, 10])
         entry_mode = random.choices(ENTRY_MODE_LABELS, weights=weights, k=1)[0]
