@@ -8,7 +8,8 @@
 --   append-only record of every event exactly as it arrived.
 -- =============================================================================
 
-CREATE OR REPLACE STREAMING TABLE bronze_layer
+CREATE OR REFRESH STREAMING TABLE bronze_layer
+SCHEDULE REFRESH EVERY 24 HOURS
 AS
 SELECT
   *,
