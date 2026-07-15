@@ -42,7 +42,7 @@ It then runs an infinite real-time loop (can be stopped manually) that emits car
 
 Events are written to a Unity Catalog Volume landing path for the bronze layer to pick up.
 
-### 2. Bronze layer — raw ingestion (`micro_batch_ingestion.py`, `bronze.sql`)
+### 2. Bronze layer - raw ingestion (`micro_batch_ingestion.py`, `bronze.sql`)
 Ingests the raw JSON files into a Delta table via Databricks Autoloader (`cloudFiles`) / `read_files`, in append-only mode with a defined event schema (transaction, customer, and merchant details). No transformation is applied — this is the untransformed system of record for every event as it arrived, including source file lineage.
 
 ### 3. Greenbacks rules configuration (`delta_rules_table.sql`)
@@ -53,14 +53,14 @@ Seeds the business rules the silver layer applies, modeled on Nedbank's Greenbac
 - **Category eligibility rules** - which spend categories earn points by default (most do; fuel is excluded by default, income/deposits never earn).
 - **Merchant-level overrides** - e.g. BP Express is the sole bp-equivalent fuel merchant eligible for both ordinary cashback and the extra fuel bonus.
 
-### 4. Silver layer — cleaning, rules, and points (`silver.py`)
+### 4. Silver layer - cleaning, rules, and points (`silver.py`)
 - Performs an incremental, watermark-based load of new bronze rows (using the silver table's own max ingestion time, with a safety buffer — no separate checkpoint file needed).
 - Flattens nested customer/merchant JSON structures and deduplicates by `transaction_id`.
 - Joins each transaction against the Greenbacks rule tables to compute `points_earned` and `points_value_rand`.
 - Recomputes a validated **cumulative points balance per customer** via a window function over the full table (not incremental — a status change on an old transaction must ripple through every later cumulative total for that customer).
 - Includes a built-in schema-mismatch auto-reset safeguard and a post-run assertion that cumulative totals reconcile against an independently computed sum, failing loudly rather than shipping silently inconsistent data.
 
-### 5. Gold layer — data mart (`data_mart.py`)
+### 5. Gold layer - data mart (`data_mart.py`)
 Builds four aggregate tables purely from the already-validated silver layer (no re-derivation of business logic):
 - `gold_customer_points_summary` — one row per customer: lifetime spend, lifetime points earned/value, transaction counts, latest known profile attributes. The "rewards dashboard" view.
 - `gold_monthly_points_trend` - points earned, value, and spend per customer per month.
