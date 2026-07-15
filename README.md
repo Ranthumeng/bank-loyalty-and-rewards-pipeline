@@ -10,9 +10,9 @@ The pipeline generates realistic, live-paced synthetic South African banking tra
 
 ```Arcitecture diagram will be added```
 
-- **Bronze layer** — untransformed, append-only Delta streaming table of every raw JSON transaction event exactly as it landed, with file-level lineage metadata (source file, ingestion time).
-- **Silver layer** — deduplicated, schema-conformed transactions joined against the Greenbacks rules tables to calculate points earned per transaction and a validated running cumulative points balance per customer.
-- **Gold layer** — a set of aggregated data mart tables built for downstream BI and dashboarding: customer rewards summaries, monthly point trends, category spend breakdowns, and a category leaderboard.
+- **Bronze layer** - untransformed, append-only Delta streaming table of every raw JSON transaction event exactly as it landed, with file-level lineage metadata (source file, ingestion time).
+- **Silver layer** - deduplicated, schema-conformed transactions joined against the Greenbacks rules tables to calculate points earned per transaction and a validated running cumulative points balance per customer.
+- **Gold layer** - a set of aggregated data mart tables built for downstream BI and dashboarding: customer rewards summaries, monthly point trends, category spend breakdowns, and a category leaderboard.
 
 ## Repository Structure
 
@@ -47,11 +47,11 @@ Ingests the raw JSON files into a Delta table via Databricks Autoloader (`cloudF
 
 ### 3. Greenbacks rules configuration (`delta_rules_table.sql`)
 Seeds the business rules the silver layer applies, modeled on Nedbank's Greenbacks Rewards Programme guide:
-- **Config constants** — Greenback-to-Rand conversion rate, and a bp fuel bonus rate (25c/litre).
-- **Level-based earn rates** — cashback earn rate by card class and customer level.
-- **Customer level mapping** — `living_tier` used as a proxy for a customer's Greenbacks level, since the synthetic data has no debit orders, loans, or savings accounts to derive a real behavioral-goal level from.
-- **Category eligibility rules** — which spend categories earn points by default (most do; fuel is excluded by default, income/deposits never earn).
-- **Merchant-level overrides** — e.g. BP Express is the sole bp-equivalent fuel merchant eligible for both ordinary cashback and the extra fuel bonus.
+- **Config constants** - Greenback-to-Rand conversion rate, and a bp fuel bonus rate (25c/litre).
+- **Level-based earn rates** - cashback earn rate by card class and customer level.
+- **Customer level mapping** - `living_tier` used as a proxy for a customer's Greenbacks level, since the synthetic data has no debit orders, loans, or savings accounts to derive a real behavioral-goal level from.
+- **Category eligibility rules** - which spend categories earn points by default (most do; fuel is excluded by default, income/deposits never earn).
+- **Merchant-level overrides** - e.g. BP Express is the sole bp-equivalent fuel merchant eligible for both ordinary cashback and the extra fuel bonus.
 
 ### 4. Silver layer — cleaning, rules, and points (`silver.py`)
 - Performs an incremental, watermark-based load of new bronze rows (using the silver table's own max ingestion time, with a safety buffer — no separate checkpoint file needed).
@@ -63,17 +63,17 @@ Seeds the business rules the silver layer applies, modeled on Nedbank's Greenbac
 ### 5. Gold layer — data mart (`data_mart.py`)
 Builds four aggregate tables purely from the already-validated silver layer (no re-derivation of business logic):
 - `gold_customer_points_summary` — one row per customer: lifetime spend, lifetime points earned/value, transaction counts, latest known profile attributes. The "rewards dashboard" view.
-- `gold_monthly_points_trend` — points earned, value, and spend per customer per month.
-- `gold_category_breakdown` — spend and points earned per customer per category, for personalized insights (e.g. "you could earn more by spending at bp").
-- `gold_category_leaderboard` — category-level totals across all customers, for an exec/dashboard view of which spend categories drive the most rewards payout.
+- `gold_monthly_points_trend` - points earned, value, and spend per customer per month.
+- `gold_category_breakdown` - spend and points earned per customer per category, for personalized insights (e.g. "you could earn more by spending at bp").
+- `gold_category_leaderboard` - category-level totals across all customers, for an exec/dashboard view of which spend categories drive the most rewards payout.
 
 A final consistency check cross-validates that lifetime totals in the customer summary table reconcile exactly with the monthly trend roll-up, and fails the run if gold has drifted from silver.
 
 ## Tech Stack
 - **Databricks** (Delta Lake, Unity Catalog, Autoloader, Declarative/Streaming Tables)
-- **PySpark** — Structured Streaming, DataFrame API, window functions
-- **SQL** — streaming table definitions, rules/config tables
-- **Python** — synthetic data generation (Faker, live SAST-aware simulation logic)
+- **PySpark** - Structured Streaming, DataFrame API, window functions
+- **SQL** - streaming table definitions, rules/config tables
+- **Python** - synthetic data generation (Faker, live SAST-aware simulation logic)
 
 ## Known Limitations
 - **Customer level is a proxy.** A real Greenbacks level is recalculated monthly from five behavioral goals (salary deposits, digital transaction count, debit orders, savings/investment growth, loan repayments). This generator has no debit order, loan, or savings account data to derive that from, so `living_tier` is used as an explicit, clearly-labeled stand-in.
