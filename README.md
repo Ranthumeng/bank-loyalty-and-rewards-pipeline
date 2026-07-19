@@ -88,3 +88,5 @@ A final consistency check cross-validates that lifetime totals in the customer s
 5. Run `data_mart.py` to build the gold-layer reporting tables.
 
 > Note: table paths in these scripts reference specific Unity Catalog volumes/schemas (e.g. `rewards_catalog.loyalty.*`, `workspace.default.*`) — update these to match your own Databricks workspace before running.
+## Author
+Bohlale Lekgau
