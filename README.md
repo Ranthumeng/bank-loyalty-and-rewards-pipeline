@@ -7,8 +7,7 @@ An end-to-end, event-driven data pipeline that simulates a bank card-spend feed 
 The pipeline generates realistic, live-paced synthetic South African banking transactions, streams them through Delta Lake, applies Greenbacks-style points-earning business rules, and produces analytics-ready gold tables for customer rewards dashboards and category-level reporting.
 
 ## Architecture
-
-```Arcitecture diagram will be added```
+![Architecture Diagram](./docs/data%20flow.png)
 
 - **Bronze layer** - untransformed, append-only Delta streaming table of every raw JSON transaction event exactly as it landed, with file-level lineage metadata (source file, ingestion time).
 - **Silver layer** - deduplicated, schema-conformed transactions joined against the Greenbacks rules tables to calculate points earned per transaction and a validated running cumulative points balance per customer.
@@ -17,6 +16,7 @@ The pipeline generates realistic, live-paced synthetic South African banking tra
 ## Repository Structure
 
 ```
+docs/
 scripts/
 ├── synthetic_population.py           # Realistic, live-paced synthetic transaction stream generator
 ├── micro_batch_ingestion.py          # Bronze layer: PySpark Structured Streaming + Databricks Autoloader ingestion
