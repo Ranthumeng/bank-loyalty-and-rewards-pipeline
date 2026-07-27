@@ -61,13 +61,13 @@ Seeds the business rules the silver layer applies, modeled on Nedbank's Greenbac
 - Includes a built-in schema-mismatch auto-reset safeguard and a post-run assertion that cumulative totals reconcile against an independently computed sum, failing loudly rather than shipping silently inconsistent data.
 
 ### 5. Gold layer - data mart (`data_mart.py`)
-Builds four aggregate tables purely from the already-validated silver layer (no re-derivation of business logic):
+Builds four aggregate tables from the already-validated silver layer:
 - `gold_customer_points_summary` — one row per customer: lifetime spend, lifetime points earned/value, transaction counts, latest known profile attributes. The "rewards dashboard" view.
 - `gold_monthly_points_trend` - points earned, value, and spend per customer per month.
 - `gold_category_breakdown` - spend and points earned per customer per category, for personalized insights (e.g. "you could earn more by spending at bp").
 - `gold_category_leaderboard` - category-level totals across all customers, for an exec/dashboard view of which spend categories drive the most rewards payout.
 
-A final consistency check cross-validates that lifetime totals in the customer summary table reconcile exactly with the monthly trend roll-up, and fails the run if gold has drifted from silver.
+To ensure data integrity, a final reconciliation check compares the customer summary table's lifetime totals against the monthly trend roll-up
 
 ## Tech Stack
 - **Databricks** (Delta Lake, Unity Catalog, Autoloader, Declarative/Streaming Tables)
