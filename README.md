@@ -90,6 +90,6 @@ To ensure data integrity, a final reconciliation check compares the customer sum
 <br>
 
 <img src="docs/Orchestration_flow.png" alt="App Screenshot" width="400" />
-> <mark>**Note: since our data generation is continuous, it will not "finish". To ensure our DAG still works great, we will decouple our pipeline into two separate jobs. The first job will the generation only and left to be continuous and the rest of our pipeline will be the second job. We will then change the trigger for the second job to 'Table Update' so it is no longer dependant on the completion of the data generation task but rather on Change Data Capture using the auto-loader destination table.** </mark><br>
+> <mark><strong>Note: since our data generation is continuous, it will not "finish". To ensure our DAG still works great, we will decouple our pipeline into two separate jobs. The first job will the generation only and left to be continuous and the rest of our pipeline will be the second job. We will then change the trigger for the second job to 'Table Update' so it is no longer dependant on the completion of the data generation task but rather on Change Data Capture using the auto-loader destination table.</strong></mark><br>
 > Note: table paths in these scripts reference specific Unity Catalog volumes/schemas (e.g. `rewards_catalog.loyalty.*`, `workspace.default.*`) — update these to match your own Databricks workspace before running.
 
