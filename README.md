@@ -70,7 +70,7 @@ Builds four aggregate tables from the already-validated silver layer:
 To ensure data integrity, a final reconciliation check compares the customer summary table's lifetime totals against the monthly trend roll-up
 
 ## Tech Stack
-- **Databricks** (Delta Lake, Unity Catalog, Autoloader, Declarative/Streaming Tables)
+- **Databricks** (Delta Lake, Unity Catalog, Autoloader, Declarative/Streaming Tables, Lakeflow)
 - **PySpark** - Structured Streaming, DataFrame API, window functions
 - **SQL** - streaming table definitions, rules/config tables
 - **Python** - synthetic data generation (Faker, live SAST-aware simulation logic)
