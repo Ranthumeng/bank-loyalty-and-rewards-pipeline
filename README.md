@@ -86,7 +86,10 @@ To ensure data integrity, a final reconciliation check compares the customer sum
 3. Run `delta_rules_table.sql` once to seed the Greenbacks configuration and rules tables.
 4. Run `silver.py` to clean, apply rules, and calculate points.
 5. Run `data_mart.py` to build the gold-layer reporting tables.<br>
-******Use lakeflow jobs to automate this process (Recommended)******
+<h2>Use lakeflow jobs to automate this process (Recommended)
+<br>
+
+<img src="docs/orchestration_flow.png" alt="App Screenshot" width="400" />
 
 > Note: table paths in these scripts reference specific Unity Catalog volumes/schemas (e.g. `rewards_catalog.loyalty.*`, `workspace.default.*`) — update these to match your own Databricks workspace before running.
 
