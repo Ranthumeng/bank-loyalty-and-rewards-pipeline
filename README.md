@@ -89,7 +89,7 @@ To ensure data integrity, a final reconciliation check compares the customer sum
 <h2>Use lakeflow jobs to automate this process (Recommended)
 <br>
 
-<img src="docs/orchestration_flow.png" alt="App Screenshot" width="400" />
+<img src="docs/Orchestration_flow.png" alt="App Screenshot" width="400" />
 
 > Note: table paths in these scripts reference specific Unity Catalog volumes/schemas (e.g. `rewards_catalog.loyalty.*`, `workspace.default.*`) — update these to match your own Databricks workspace before running.
 
