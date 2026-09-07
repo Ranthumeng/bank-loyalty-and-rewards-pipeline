@@ -500,16 +500,51 @@ NO_ONLINE_MERCHANTS = {
 # fuel stations (most SA forecourts run 24 hours), utilities/EFT payments (online banking
 # has no closing time), ride-hailing apps, and pure e-commerce storefronts.
 MERCHANT_OPERATING_HOURS = {
-    "groceries":              {"open": 7,  "close": 21},   # typical supermarket hours
-    "fuel":                   {"always_open": True},        # SA forecourts widely trade 24/7
-    "utilities":              {"always_open": True},        # EFT / online municipal payment
-    "dining":                 {"open": 8,  "close": 23},
-    "pharmacy":               {"open": 8,  "close": 20},
-    "retail":                 {"open": 9,  "close": 19},
-    "fitness":                {"open": 5,  "close": 22},
-    "transport":              {"open": 5,  "close": 23},    # default; ride-hailing overridden below
-    "domestic_travel":        {"always_open": True},        # flights/accommodation booked online anytime
-    "alcohol_and_nightlife":  {"open": 9,  "close": 18},    # off-consumption liquor sales; special-cased below
+    "groceries": {
+        "open": 7, "close": 21,
+        "day_overrides": {
+            6: {"close": 19},              # Sunday: most supermarkets trim evening hours
+        },
+    },
+    "fuel":                   {"always_open": True},
+    "utilities":              {"always_open": True},
+    "dining": {
+        "open": 8, "close": 22,
+        "day_overrides": {
+            4: {"close": 23},              # Friday: later close
+            5: {"close": 23},              # Saturday: later close
+        },
+    },
+    "pharmacy": {
+        "open": 8, "close": 19,
+        "day_overrides": {
+            5: {"close": 16},              # Saturday: shorter (cf. Clicks 08:00-16:00)
+            6: {"open": 9, "close": 14},   # Sunday: shorter still (cf. Clicks 09:00-14:00)
+        },
+    },
+    "retail": {
+        "open": 9, "close": 19,
+        "day_overrides": {
+            5: {"close": 17},              # Saturday: closes earlier (cf. Mr Price ~16:00-17:00)
+            6: {"open": 10, "close": 16},  # Sunday: opens later, closes earlier
+        },
+    },
+    "fitness": {
+        "open": 5, "close": 22,
+        "day_overrides": {
+            5: {"close": 18},              # Saturday: reduced staffed hours
+            6: {"open": 7, "close": 15},   # Sunday: shortest window
+        },
+    },
+    "transport":               {"open": 5,  "close": 23},
+    "domestic_travel":         {"always_open": True},
+    "alcohol_and_nightlife": {
+        "open": 9, "close": 18,
+        "day_overrides": {
+            5: {"close": 13},              # Saturday: shortened legal trading window
+            6: {"closed": True},           # Sunday: off-consumption liquor sales prohibited
+        },
+    },
 }
 
 # Per-merchant overrides where a specific brand doesn't follow its category default
@@ -1023,18 +1058,26 @@ try:
         if 0 <= hour <= 5:
             traffic_density = random.uniform(0.01, 0.05)
             status_tag = "OFF-PEAK (LATE NIGHT)"
-        elif 12 <= hour <= 14:
-            traffic_density = random.uniform(0.85, 1.00)
-            status_tag = "HIGH PEAK (LUNCH RUSH)"
-        elif 16 <= hour <= 19:
-            traffic_density = random.uniform(0.80, 0.95)
-            status_tag = "HIGH PEAK (EVENING COMMUTE)"
         elif 6 <= hour <= 9:
             traffic_density = random.uniform(0.40, 0.65)
             status_tag = "MORNING RAMP"
+        elif 10 <= hour <= 11:
+            traffic_density = random.uniform(0.35, 0.55)
+            status_tag = "MID-MORNING STABLE"
+        elif 12 <= hour <= 14:
+            traffic_density = random.uniform(0.85, 1.00)
+            status_tag = "HIGH PEAK (LUNCH RUSH)"
+        elif hour == 15:
+            traffic_density = random.uniform(0.30, 0.50)
+            status_tag = "AFTERNOON LULL"
+        elif 16 <= hour <= 19:
+            traffic_density = random.uniform(0.80, 0.95)
+            status_tag = "HIGH PEAK (EVENING COMMUTE)"
+        elif 20 <= hour <= 23:
+            traffic_density = random.uniform(0.10, 0.30)
+            status_tag = "OFF-PEAK (LATE EVENING)"
         else:
-            traffic_density = random.uniform(0.20, 0.45)
-            status_tag = "MID-DAY STABLE"
+            raise ValueError(f"Unhandled hour value in traffic bucketing: {hour!r}")
 
 
         # Translate numerical system density into dynamic inverse delay pacing
